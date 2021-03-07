@@ -21,7 +21,7 @@ const char* pass = "YOUR-WiFi-Password";        // your network password
 const char* hostname = "openWB-Display";      
 
 // MQTT Setup
-IPAddress MQTT_Broker(192,168,178,51); // MQTT Broker IP
+IPAddress MQTT_Broker(192,168,178,51); // openWB IP address
 const int MQTT_Broker_Port = 1883;
 
 // MQTT topics and variables for retrieved values
