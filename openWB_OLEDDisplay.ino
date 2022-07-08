@@ -19,8 +19,8 @@
 // ***********************************
 
 // Network setup
-const char* ssid = "SSID";              // your network SSID (name)
-const char* pass = "PASSWORD";        // your network password
+const char* ssid = "Xegony";              // your network SSID (name)
+const char* pass = "Klumpert!23456";        // your network password
 const char* hostname = "openWB-Display";      
 
 // MQTT Setup
