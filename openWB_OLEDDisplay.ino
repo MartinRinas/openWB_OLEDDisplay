@@ -9,6 +9,9 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
+// UI_STYLE defines the style of the UI
+// 1 is orignal, 2 is with grafic symbols
+#define UI_GRAPHIC_STYLE
 
 // Global constants for WiFi connections
 // ***********************************
@@ -16,20 +19,29 @@
 // ***********************************
 
 // Network setup
-const char* ssid = "YOUR-SSID";              // your network SSID (name)
-const char* pass = "YOUR-WiFi-Password";        // your network password
+const char* ssid = "Xegony";              // your network SSID (name)
+const char* pass = "Klumpert!23456";        // your network password
 const char* hostname = "openWB-Display";      
 
 // MQTT Setup
-IPAddress MQTT_Broker(192,168,178,51); // openWB IP address
+IPAddress MQTT_Broker(192,168,10,140); // openWB IP address
 const int MQTT_Broker_Port = 1883;
 
 // MQTT topics and variables for retrieved values
 const char* MQTT_EVU_W = "openWB/evu/W";    // current power at EVU
+#ifndef UI_GRAPHIC_STYLE
 float EVU_kW = 0;
+#else UI_GRAPHIC_STYLE
+int EVU_W = 0;
+int EVU_dir = 1;
+#endif
 
 const char* MQTT_PV_W = "openWB/pv/W";      // current PV power
+#ifndef UI_GRAPHIC_STYLE
 float PV_kW = 0;
+#else
+int PV_W = 0;
+#endif
 
 const char* MQTT_LP_all_W= "openWB/global/WAllChargePoints";  // current power draw for all charge points
 int LP_all_W = 0;
@@ -47,6 +59,51 @@ bool LP1_IsCharging = false;
 // Display Setup
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
+
+#ifdef UI_GRAPHIC_STYLE
+#define shift_k_value  3
+#define shift_dot  1
+
+const uint8_t blitz[10] = { 0x3c, 0x78, 0x70, 0xe0,
+                            0xfc, 0x38, 0x30, 0x60,
+                            0xc0, 0x80};
+const uint8_t arrow_right[10] = { 0x00, 0x08, 0x0c, 0x0e,
+                                  0xff, 0xff, 0x0e, 0x0c,
+                                  0x08, 0x00 };
+const uint8_t arrow_left[10] = { 0x00, 0x10, 0x30, 0x70,
+                                 0xff, 0xff, 0x70, 0x30,
+                                 0x10, 0x00 };
+const uint8_t haus[15] = { 0x0c, 0x01, 0xe0, 0x3f, 
+                           0x07, 0xf8, 0xff, 0xcc, 
+                           0xcc, 0xcc, 0xcf, 0xcc,
+                           0xfc, 0xcf, 0xcc};
+const uint8_t haus2[20] = { 0x0c, 0x00, 0x1e, 0x00, 
+                            0x3f, 0x00, 0x7f, 0x80,
+                            0xff, 0xc0, 0xcc, 0xc0,
+                            0xcc, 0xc0, 0xfc, 0xc0,
+                            0xfc, 0xc0, 0xfc, 0xc0 };
+const uint8_t unplugged[30] = { 0x00, 0x00, 0x00,
+                                0xf0, 0x00, 0x00,
+                                0xb0, 0x00, 0x00,
+                                0xb0, 0x60, 0x00,
+                                0x90, 0x40, 0x00,
+                                0xde, 0x40, 0x00,
+                                0xd2, 0x40, 0x00,
+                                0xf2, 0x40, 0x00,
+                                0xf2, 0xc0, 0x00,
+                                0xf0, 0x00, 0x00 };
+const uint8_t plugged[30] = { 0x00, 0x07, 0xf0,
+                              0xf0, 0x04, 0x10,
+                              0xb0, 0x08, 0x08,
+                              0xb0, 0x08, 0x08,
+                              0x90, 0x38, 0x0e,
+                              0xde, 0x0f, 0xf8,
+                              0xd2, 0x79, 0xc8,
+                              0xf2, 0x4f, 0xf8,
+                              0xf3, 0xcf, 0xf8,
+                              0xf0, 0x0c, 0x18 };
+#endif
+
 
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 #define OLED_RESET     0 // Reset pin # (or -1 if sharing Arduino reset pin)
@@ -139,8 +196,19 @@ void MQTTCallback(char* topic, byte* payload, unsigned int length)
   
   // store values in variables
   // todo use MQTT_ constants instead of hard coded values to compare
+#ifndef UI_GRAPHIC_STYLE
   if (strcmp(topic,"openWB/evu/W")==0){EVU_kW = (msg.toFloat())/1000;}
   if (strcmp(topic,"openWB/pv/W")==0){PV_kW = (msg.toFloat()*-1)/1000;}
+#else
+  if (strcmp(topic,"openWB/evu/W")==0){ EVU_W = (msg.toInt()); EVU_dir = 1;
+                                        if (EVU_W < 0)
+                                        {
+                                           EVU_W = EVU_W*(-1);
+                                           EVU_dir = -1;
+                                        }
+                                      }
+  if (strcmp(topic,"openWB/pv/W")==0){PV_W = (msg.toInt()*-1);}
+#endif
   if (strcmp(topic,"openWB/global/WAllChargePoints")==0){LP_all_W = msg.toInt();}
   if (strcmp(topic,"openWB/lp/1/%Soc")==0){LP1_SOC = msg.toInt();}
   if (strcmp(topic,"openWB/lp/1/boolChargeStat")==0){LP1_IsCharging = msg.toInt();}
@@ -165,6 +233,105 @@ void WriteDisplayText(String msg)
   display.display();
 }
 
+#ifdef UI_GRAPHIC_STYLE
+void WriteWattValue(int Watt, int x, int y)
+{
+  // check if Watt Value is smaller than 1000 (=1kW)
+  if (Watt < 1000)
+  {
+	// value is smaller than 1kW, 
+	// need to write value right-aligned
+    if (Watt < 10)
+    {
+      display.setCursor(x-1*12, y);
+    }
+    else if (Watt < 100)
+    {
+      display.setCursor(x-2*12, y);
+    }
+    else
+    {
+      display.setCursor(x-3*12, y);
+    }
+    display.println(String(Watt));
+  }
+  else
+  {
+    if (Watt < 10000)
+    {
+      int D_Watt_kW=Watt/1000;
+      //int D_Watt_W=Watt-D_Watt_kW*1000;
+      int D_Watt_W=Watt%1000;
+      if (D_Watt_W <10)
+      {
+        display.setCursor(x-3*12, y);
+        display.print("00"+String(D_Watt_W));
+        display.setCursor(x-4*12+shift_dot, y);
+        display.print(".");
+        display.setCursor(x-5*12+shift_k_value+shift_dot, y);
+        display.print(String(D_Watt_kW));
+      }
+      else if (D_Watt_W < 100)
+      {
+        display.setCursor(x-3*12, y);
+        display.print("0"+String(D_Watt_W));
+        display.setCursor(x-4*12+shift_dot, y);
+        display.print(".");
+        display.setCursor(x-5*12+shift_k_value+shift_dot, y);
+        display.print(String(D_Watt_kW));
+      }
+      else
+      {
+        display.setCursor(x-3*12, y);
+        display.print(String(D_Watt_W));
+        display.setCursor(x-4*12+shift_dot, y);
+        display.print(".");
+        display.setCursor(x-5*12+shift_k_value+shift_dot, y);
+        display.print(String(D_Watt_kW));
+      }
+    }
+    else
+    {
+      int D_Watt_kW=Watt/1000;
+      //int D_Watt_W=Watt-D_Watt_kW*1000;
+      int D_Watt_W=(Watt%1000)/10;
+      if (D_Watt_W <100)
+      {
+        display.setCursor(x-2*12, y);
+        display.print("0"+String(D_Watt_W));
+        display.setCursor(x-3*12+shift_dot, y);
+        display.print(".");
+        display.setCursor(x-5*12+shift_k_value+shift_dot, y);
+        display.print(String(D_Watt_kW));
+      }
+      else
+      {
+        display.setCursor(x-2*12, y);
+        display.print(String(D_Watt_W));
+        display.setCursor(x-3*12+shift_dot, y);
+        display.print(".");
+        display.setCursor(x-5*12+shift_k_value+shift_dot, y);
+        display.print(String(D_Watt_kW));
+      }
+    }
+  }
+}
+
+void drawBitmap(uint16_t x, uint16_t y, uint8_t bitmap[], uint16_t w, uint16_t h)
+{
+  for (int i=0; i<w; i++)
+  {
+    for (int j=0; j<h; i++)
+    {
+      uint16_t bitindex = i+j*h;
+      uint16_t byteindex = bitindex/8;
+      uint8_t bytebitindex = bitindex % 8;
+      uint16_t color = (bitmap[byteindex] >> bytebitindex) & 0x01;
+      //drawPixel(x+i, y+j, color);
+    }
+  }
+}
+#endif
 
 void UpdateDisplay()
 {
@@ -174,7 +341,8 @@ void UpdateDisplay()
   // Text Size 3: single char 18*24x, 7 chars per row, 2.5 rows 
   // Text Size 4: single char 24*32x, 5 chars per row, 2 rows 
   // Text Size 8: single char 48*64x, 2 chars per row, 1 row 
-  
+
+#ifndef UI_GRAPHIC_STYLE
   display.clearDisplay();
   display.setCursor(0,0); //set upper left corner of cursor to upper left corner of display
   display.setTextSize(1);
@@ -206,9 +374,135 @@ void UpdateDisplay()
   display.setTextSize(2);
   display.print(LP_all_W);
   display.setCursor(11*6,32+8); //11 chars a 6px right, one 8px row below half of the display height (32px)
-  display.print(String(LP1_SOC) + "%");
-  display.display();
+  String LP1_SOC_string="";
+  if (LP1_SOC < 10)
+  {
+    LP1_SOC_string = "  "+String(LP1_SOC);
+  }
+  else if (LP1_SOC < 100)
+  {
+    LP1_SOC_string = " "+String(LP1_SOC);
+  }
+  else LP1_SOC_string = String(LP1_SOC);
+  display.print(LP1_SOC_string + "%");
+#else
+  display.clearDisplay();
+  display.setCursor(0,0); //set upper left corner of cursor to upper left corner of display
+  
+  String ChargeStatus="";
+  if(LP1_IsCharging)
+  {
+    ChargeStatus = "C";
+  }
+  else if(LP1_PlugStat==true)
+  {
+    ChargeStatus="P";
+  }
+  else
+  {
+    ChargeStatus=" ";
+  }
 
+  display.setTextSize(1);
+  display.setCursor(SCREEN_WIDTH/2-shift_k_value-shift_dot-8*6,0); // Text size 1 has width of 6
+  // check if EVU power is smaller than 1 kW
+  if (EVU_W < 1000)
+  {
+    // display description and value in W
+    display.println(" EVU (W)");
+  }
+  else
+  {
+    // display description and value in kW
+    display.println("EVU (kW)");
+  }
+  display.setTextSize(2);
+  WriteWattValue(EVU_W, SCREEN_WIDTH/2-shift_k_value-shift_dot, 10);
+
+  display.setTextSize(1);
+  display.setCursor(SCREEN_WIDTH-7*6,0); // Text size 1 has width of 6
+  // check if PV power is smaller than 1 kW
+  if (PV_W < 1000)
+  {
+    // display description and value in W
+    display.println(" PV (W)");
+  }
+  else
+  {
+    // display description and value in kW
+    display.println("PV (kW)");
+  }
+  display.setTextSize(2);
+  WriteWattValue(PV_W, SCREEN_WIDTH, 10);
+
+  display.setTextSize(1);
+  display.setCursor(SCREEN_WIDTH/2-shift_k_value-shift_dot-8*6,40); // Text size 1 has width of 6
+  // check if ALL LP power is smaller than 1 kW
+  if (LP_all_W < 1000)
+  {
+    // display description and value in W
+    display.println(" ALL (W)");
+  }
+  else
+  {
+    // display description and value in kW
+    display.println("ALL (kW)");
+  }
+  display.setTextSize(2);
+  WriteWattValue(LP_all_W, SCREEN_WIDTH/2-shift_k_value-shift_dot, 50);
+  
+  display.setTextSize(1);
+  display.setCursor(SCREEN_WIDTH-9*6,40); // Text size 1 has width of 6
+  display.println(ChargeStatus+" SoC LP1"); // Charge Status as Symbol also available, could be removed from this line
+  display.setTextSize(2);
+  if (LP1_SOC < 10)
+  {
+    display.setCursor(SCREEN_WIDTH-2*12,50);
+  }
+  else if (LP1_SOC < 100)
+  {
+    display.setCursor(SCREEN_WIDTH-3*12,50);
+  }
+  else 
+  {
+    display.setCursor(SCREEN_WIDTH-4*12,50);
+  }
+  display.print(String(LP1_SOC)+"%");
+
+  // drawing if energy is imported or exported
+  // drawing the Power Symbol
+  display.drawBitmap(20+0, 27, blitz, 8, 10, WHITE);
+  // drawing the arrow (from or to house)
+  if (EVU_dir > 0)
+  {
+    display.drawBitmap(20+8, 27, arrow_right, 8, 10, WHITE);
+  }
+  else
+  {
+    display.drawBitmap(20+8, 27, arrow_left, 8, 10, WHITE);
+  }
+  // drawing the house
+  display.drawBitmap(20+18, 27, haus2, 16, 10, WHITE);
+
+  // drawing the status of the charging station PLUGGED - UNPLUGGED - CHARGING (charging is also plugged!)
+  if(LP1_IsCharging)
+  {
+    // charging, drawing plugged car plus Power symbol
+    display.drawBitmap(SCREEN_WIDTH/2+20, 27, plugged, 24, 10, WHITE);
+    display.drawBitmap(SCREEN_WIDTH/2+20+24+2, 27, blitz, 8, 10, WHITE);
+  }
+  else if(LP1_PlugStat==true)
+  {
+    // charging, drawing plugged car only - IMPORTANT BUG POSSIBLE POWER SYMBOL COULD STAY, MIGHT NEED BLACK SQUARE DRAWING
+    display.drawBitmap(SCREEN_WIDTH/2+20, 27, plugged, 24, 10, WHITE);
+  }
+  else
+  {
+    // charging, drawing unplugged car only - IMPORTANT BUG POSSIBLE POWER SYMBOL COULD STAY, MIGHT NEED BLACK SQUARE DRAWING
+    display.drawBitmap(SCREEN_WIDTH/2+20, 27, unplugged, 20, 10, WHITE);
+  }
+#endif
+  display.display();
 }
 
 // ------------------------------------------------
