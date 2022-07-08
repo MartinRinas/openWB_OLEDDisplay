@@ -23,16 +23,22 @@ The text was moved to fit better on screen and give some space for the grafics. 
 # Examples for Graphic Symbols
 Example plugged car
 ![Screenshot of Display](images/Display_example_1.jpg)
+
 Example for charging car
 ![Screenshot of Display](images/Display_example_2.jpg)
+
 Symbols:
 Import of energy
 ![Screenshot of Display](images/Display_import.jpg)
+
 Export of energy
 ![Screenshot of Display](images/Display_export.jpg)
+
 Unplugged
 ![Screenshot of Display](images/Display_unplugged.jpg)
+
 Plugged
-![Screenshot of Display](images/Display_pluged.jpg)
+![Screenshot of Display](images/Display_plugged.jpg)
+
 Charging
 ![Screenshot of Display](images/Display_charging.jpg)
