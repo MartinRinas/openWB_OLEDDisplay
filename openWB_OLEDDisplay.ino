@@ -1,64 +1,80 @@
+// Core / Platform
 #include <ESP8266WiFi.h>
 #include <WiFiUDP.h>
 #include <ESP8266mDNS.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPUpdateServer.h>
-#include <PubSubClient.h>
 #include <SPI.h>
 #include <Wire.h>
+
+// Display libraries
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-// UI_STYLE defines the style of the UI
-// 1 is orignal, 2 is with grafic symbols
+// Local modules
+#include "parser.h"
+#include "http_client.h"
+
+// Define UI style (graphic style adds symbols & alignment logic)
 #define UI_GRAPHIC_STYLE
 
-// Global constants for WiFi connections
-// ***********************************
-// Need to replace with WiFiManager
-// ***********************************
+// TODO: Replace static credentials with WiFiManager / captive portal for production use.
 
 // Network setup
-const char* ssid = "YOUR-SSID";              // your network SSID (name)
-const char* pass = "YOUR-WiFi-Password";        // your network password
-const char* hostname = "openWB-Display";      
+const char* ssid = "SSID";              // your network SSID (name)
+const char* pass = "PASSWORD";        // your network password
+const char* hostname = "evcc-Display";      
 
-// MQTT Setup
-IPAddress MQTT_Broker(192,168,10,140); // openWB IP address
-const int MQTT_Broker_Port = 1883;
+// ------------------------------------------------
+// HTTP Polling Configuration
+// ------------------------------------------------
+// Uses evcc state endpoint with minimized jq filter to keep payload & RAM small.
 
-// MQTT topics and variables for retrieved values
-const char* MQTT_EVU_W = "openWB/evu/W";    // current power at EVU
+const char* HTTP_HOST = "192.168.178.29";   // evcc IP 
+const uint16_t HTTP_PORT = 7070;              // HTTP port, default 7070
+// For evcc switch to the state endpoint; adding jq filter returns full structure. Remove jq param if not supported.
+// Use minimized EVCC state (much smaller) via jq filter: returns only needed keys.
+// Original (full) was: /api/state?jq=.  (very large ~ >10KB)
+// Minified filter now requests up to first two loadpoints (filters out null), each mapped to minimal fields.
+// Unencoded jq filter:
+// {gridPower:.grid.power,pvPower:.pvPower,loadpoints:[.loadpoints[0],.loadpoints[1]]|map(select(.!=null)|{chargePower:.chargePower,soc:(.vehicleSoc//.soc),charging:.charging,plugged:(.connected//.plugged)})}
+// URL-encoded version below (safer for query string):
+const char* HTTP_PATH = "/api/state?jq=%7BgridPower:.grid.power,pvPower:.pvPower,loadpoints:[.loadpoints[0],.loadpoints[1]]%7Cmap(select(.!=null)%7C%7BchargePower:.chargePower,soc:(.vehicleSoc//.soc),charging:.charging,plugged:(.connected//.plugged)%7D)%7D"; 
+
+// Polling interval (ms)
+const unsigned long POLL_INTERVAL_MS = 5000; // configurable polling interval
+
+// Data variables (updated after each successful poll & parse)
 #ifndef UI_GRAPHIC_STYLE
-float EVU_kW = 0;
-#else UI_GRAPHIC_STYLE
-int EVU_W = 0;
-int EVU_dir = 1;
-#endif
-
-const char* MQTT_PV_W = "openWB/pv/W";      // current PV power
-#ifndef UI_GRAPHIC_STYLE
-float PV_kW = 0;
+float EVU_kW = 0;        // EVU power (shown in kW if text mode)
+float PV_kW = 0;         // PV power (negative import handling similar to previous logic)
 #else
-int PV_W = 0;
+int EVU_W = 0;           // Absolute grid power value (always positive for display)
+int EVU_dir = 1;         // 1 import, -1 export (direction arrow)
+int PV_W = 0;            // PV power (positive generation)
 #endif
+int LP_all_W = 0;        // Combined power of all charge points (sum of chargePower)
+int LP1_SOC = -1;             // (legacy) Currently displayed LP SoC (kept for minimal changes in text UI path)
+bool LP1_PlugStat = false;    // (legacy) Currently displayed LP plugged
+bool LP1_IsCharging = false;  // (legacy) Currently displayed LP charging
 
-const char* MQTT_LP_all_W= "openWB/global/WAllChargePoints";  // current power draw for all charge points
-int LP_all_W = 0;
+// Global metrics structure holding up to two loadpoints
+Metrics g_metrics;            // Filled by PollAndUpdate(); used for cycling display between loadpoints
 
-const char* MQTT_LP1_SOC= "openWB/lp/1/%Soc";  // current power draw for all charge points
-int LP1_SOC = 0;
-
-const char* MQTT_LP1_PlugStat = "openWB/lp/1/boolPlugStat"; // is the car plugged in?
-bool LP1_PlugStat = false;
-
-const char* MQTT_LP1_IsCharging = "openWB/lp/1/boolChargeStat"; // charging active?
-bool LP1_IsCharging = false;
+// Loadpoint display cycling
+const unsigned long LP_CYCLE_INTERVAL_MS = 7000; // Interval to auto-switch displayed loadpoint (if >=2)
+uint8_t currentLpIndex = 0;                      // Which loadpoint is currently shown
+unsigned long lastLpSwitchMillis = 0;            // Timestamp of last automatic switch
 
 
 // Display Setup
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
+
+// Display rotation (0=normal, 1=90°, 2=180°, 3=270°). Set to 2 to flip 180°.
+#ifndef DISPLAY_ROTATION
+#define DISPLAY_ROTATION 2
+#endif
 
 #ifdef UI_GRAPHIC_STYLE
 #define shift_k_value  3
@@ -109,17 +125,63 @@ const uint8_t plugged[30] = { 0x00, 0x07, 0xf0,
 #define OLED_RESET     0 // Reset pin # (or -1 if sharing Arduino reset pin)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-unsigned long currentMillis;
-unsigned long previousMillis = 0;         // last time data was fetched
-unsigned long lastMQTTDataReceived = 0;
-int MaxDataAge = 30*1000; // max wait time for new data from MQTT subscription
+unsigned long lastDataReceived = 0;          // when last successful HTTP data was parsed
+const unsigned long DATA_STALE_MS = 30UL * 1000UL; // age at which we mark data stale
 
-WiFiClient espClient;
-PubSubClient MQTTClient(espClient);
-long lastReconnectAttempt = 0; // WiFi Reconnection timer
+WiFiClient httpClient;                       // used for HTTP requests
+unsigned long lastPollAttempt = 0;           // last poll attempt timestamp
+uint8_t consecutiveFailures = 0;             // track failures for optional backoff
 
 // Config flags do enable features
 const bool isDebug = 1;                        // Send debug messages to serial port?
+
+// -----------------------------
+// In-memory Log Buffer (HTTP accessible)
+// -----------------------------
+#define LOG_BUFFER_LINES 120            // number of lines to keep
+#define LOG_MAX_LINE_LEN 120            // max length per stored line (longer lines truncated)
+String LogBuffer[LOG_BUFFER_LINES];
+uint16_t LogWriteIndex = 0;             // next slot to write
+bool LogWrapped = false;                // indicates wrap-around occurred
+
+void AddLogLine(const String &line)
+{
+  String trimmed = line;
+  // Ensure line length bounded to save RAM
+  if(trimmed.length() > LOG_MAX_LINE_LEN) {
+    trimmed = trimmed.substring(0, LOG_MAX_LINE_LEN-3) + "...";
+  }
+  LogBuffer[LogWriteIndex] = trimmed;
+  LogWriteIndex = (LogWriteIndex + 1) % LOG_BUFFER_LINES;
+  if(LogWriteIndex == 0) LogWrapped = true;
+}
+
+String GetAllLogs()
+{
+  String out;
+  if(LogWrapped)
+  {
+    for(uint16_t i = LogWriteIndex; i < LOG_BUFFER_LINES; i++)
+    {
+      out += LogBuffer[i];
+      out += '\n';
+    }
+  }
+  for(uint16_t i = 0; i < LogWriteIndex; i++)
+  {
+    out += LogBuffer[i];
+    out += '\n';
+  }
+  return out;
+}
+
+void ClearLogs()
+{
+  for(uint16_t i=0;i<LOG_BUFFER_LINES;i++) LogBuffer[i] = "";
+  LogWriteIndex = 0;
+  LogWrapped = false;
+  AddLogLine("<log cleared>");
+}
 
 // ESP8266 Webserver and update server
 ESP8266WebServer server(80);              // HTTP server port
@@ -129,7 +191,8 @@ void WriteLog(String msg,bool NewLine=1)  // helper function for logging, only w
 {
   if(NewLine)
   {
-    if(isDebug){Serial.println(msg);}
+    if(isDebug){Serial.println(msg);}    
+    AddLogLine(msg);
   }
   else
   {
@@ -137,28 +200,47 @@ void WriteLog(String msg,bool NewLine=1)  // helper function for logging, only w
   } 
 }
 
-boolean MQTTReconnect() 
+// Poll + parse helper
+bool PollAndUpdate()
 {
-  if (MQTTClient.connect(hostname)) 
-  {
-    WriteLog("MQTT Reconnected");
-    boolean r = MQTTClient.subscribe(MQTT_EVU_W);
-    if (r)
-    {
-        WriteLog("MQTT subscription suceeded");
+    String body;
+    if(!HttpGet(HTTP_HOST, HTTP_PORT, HTTP_PATH, body)) return false;
+    Metrics m;
+    if(!ParseEvccState(body, m)) {
+        WriteLog("Parse failed");
+        return false;
     }
-    else
-    {
-        WriteLog("MQTT subscription failed");
-    }
-    
-    r = MQTTClient.subscribe(MQTT_LP_all_W);
-    r = MQTTClient.subscribe(MQTT_PV_W);
-    r = MQTTClient.subscribe(MQTT_LP1_SOC);
-    r = MQTTClient.subscribe(MQTT_LP1_IsCharging);
-    r = MQTTClient.subscribe(MQTT_LP1_PlugStat);
+    // Map metrics to display globals
+#ifdef UI_GRAPHIC_STYLE
+  EVU_dir = (m.gridPower >= 0) ? 1 : -1;
+  EVU_W   = (m.gridPower >= 0) ? m.gridPower : -m.gridPower;
+  PV_W    = (m.pvPower < 0) ? -m.pvPower : m.pvPower;
+#else
+    EVU_kW  = ((float)m.gridPower) / 1000.0f;
+    PV_kW   = ((float)m.pvPower) / 1000.0f;
+#endif
+  LP_all_W      = (int)m.totalChargePower;
+
+  // Persist full metrics for cycling logic
+  g_metrics = m; // struct copy (small)
+
+  // Update legacy single-LP vars from currently selected index
+  if (g_metrics.lpCount > currentLpIndex) {
+    LP1_SOC        = g_metrics.lps[currentLpIndex].soc;
+    LP1_IsCharging = g_metrics.lps[currentLpIndex].charging;
+    LP1_PlugStat   = g_metrics.lps[currentLpIndex].plugged;
+  } else if (g_metrics.lpCount > 0) {
+    // fallback to first
+    LP1_SOC        = g_metrics.lps[0].soc;
+    LP1_IsCharging = g_metrics.lps[0].charging;
+    LP1_PlugStat   = g_metrics.lps[0].plugged;
+  } else {
+    LP1_SOC = -1; LP1_IsCharging = false; LP1_PlugStat = false;
   }
-  return MQTTClient.connected();
+    lastDataReceived = millis();
+    consecutiveFailures = 0;
+    UpdateDisplay();
+    return true;
 }
 
 void HandleRoot()                                                 // Handle Webserver request on root
@@ -167,9 +249,22 @@ void HandleRoot()                                                 // Handle Webs
   WebserverResponse(res);
 }
 
-void HandleMQTTStatus()
+void HandleLogs()
 {
-  String res = String(MQTTClient.state());
+  String logs = GetAllLogs();
+  server.sendHeader("Cache-Control","no-cache");
+  server.send(200, "text/plain", logs);
+}
+
+void HandleLogsClear()
+{
+  ClearLogs();
+  server.send(200, "text/plain", "cleared");
+}
+
+void HandleMQTTStatus() // Retained for compatibility: now returns static info
+{
+  String res = String("MQTT disabled; using HTTP polling");
   WebserverResponse(res);
 }
 
@@ -182,41 +277,7 @@ void WebserverResponse(String str)
     WriteLog("Sending HTTP response: " + str);
 }
 
-void MQTTCallback(char* topic, byte* payload, unsigned int length) 
-{
-  lastMQTTDataReceived = millis();
-  WriteLog("Message arrived: [" ,0);
-  WriteLog(topic ,0);
-  WriteLog("]" ,0);
-  String msg;
-  for (int i=0;i<length;i++) { // extract payload
-    msg = msg + (char)payload[i];
-  }
-  WriteLog(msg);
-  
-  // store values in variables
-  // todo use MQTT_ constants instead of hard coded values to compare
-#ifndef UI_GRAPHIC_STYLE
-  if (strcmp(topic,"openWB/evu/W")==0){EVU_kW = (msg.toFloat())/1000;}
-  if (strcmp(topic,"openWB/pv/W")==0){PV_kW = (msg.toFloat()*-1)/1000;}
-#else
-  if (strcmp(topic,"openWB/evu/W")==0){ EVU_W = (msg.toInt()); EVU_dir = 1;
-                                        if (EVU_W < 0)
-                                        {
-                                           EVU_W = EVU_W*(-1);
-                                           EVU_dir = -1;
-                                        }
-                                      }
-  if (strcmp(topic,"openWB/pv/W")==0){PV_W = (msg.toInt()*-1);}
-#endif
-  if (strcmp(topic,"openWB/global/WAllChargePoints")==0){LP_all_W = msg.toInt();}
-  if (strcmp(topic,"openWB/lp/1/%Soc")==0){LP1_SOC = msg.toInt();}
-  if (strcmp(topic,"openWB/lp/1/boolChargeStat")==0){LP1_IsCharging = msg.toInt();}
-  if (strcmp(topic,"openWB/lp/1/boolPlugStat")==0){LP1_PlugStat = msg.toInt();}
-  
-  // processed incoming message, lets update the display
-  UpdateDisplay();
-}
+// Removed MQTT callback (logic replaced by HTTP JSON polling)
 
 void WriteDisplayNewText(String msg)
 {
@@ -389,19 +450,14 @@ void UpdateDisplay()
   display.clearDisplay();
   display.setCursor(0,0); //set upper left corner of cursor to upper left corner of display
   
+  // Determine currently displayed loadpoint data (cycling aware)
+  int dispSoc = LP1_SOC;
+  bool dispCharging = LP1_IsCharging;
+  bool dispPlugged = LP1_PlugStat;
   String ChargeStatus="";
-  if(LP1_IsCharging)
-  {
-    ChargeStatus = "C";
-  }
-  else if(LP1_PlugStat==true)
-  {
-    ChargeStatus="P";
-  }
-  else
-  {
-    ChargeStatus=" ";
-  }
+  if(dispCharging)      ChargeStatus = "C";
+  else if(dispPlugged)  ChargeStatus = "P";
+  else                  ChargeStatus = " ";
 
   display.setTextSize(1);
   display.setCursor(SCREEN_WIDTH/2-shift_k_value-shift_dot-8*6,0); // Text size 1 has width of 6
@@ -453,13 +509,15 @@ void UpdateDisplay()
   
   display.setTextSize(1);
   display.setCursor(SCREEN_WIDTH-9*6,40); // Text size 1 has width of 6
-  display.println(ChargeStatus+" SoC LP1"); // Charge Status as Symbol also available, could be removed from this line
+  // Add LP index label (LP1 / LP2) if more than one loadpoint available
+  String lpLabel = String(" SoC LP") + String(currentLpIndex+1);
+  display.println(ChargeStatus + lpLabel); // Charge Status + dynamic LP label
   display.setTextSize(2);
-  if (LP1_SOC < 10)
+  if (dispSoc < 10)
   {
     display.setCursor(SCREEN_WIDTH-2*12,50);
   }
-  else if (LP1_SOC < 100)
+  else if (dispSoc < 100)
   {
     display.setCursor(SCREEN_WIDTH-3*12,50);
   }
@@ -467,7 +525,7 @@ void UpdateDisplay()
   {
     display.setCursor(SCREEN_WIDTH-4*12,50);
   }
-  display.print(String(LP1_SOC)+"%");
+  display.print(String(dispSoc)+"%");
 
   // drawing if energy is imported or exported
   // drawing the Power Symbol
@@ -517,13 +575,14 @@ void setup()
   while (!Serial) { // wait for serial port to connect. 
     ; 
   }
-  WriteLog("openWB Display Init");
+  WriteLog("evcc Display Init");
   
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
   Serial.println(F("SSD1306 allocation failed"));
   for(;;); // Don't proceed, loop forever
   }
   display.display();
+  display.setRotation(DISPLAY_ROTATION); // apply rotation
   
   // Clear the buffer
   display.clearDisplay();
@@ -562,17 +621,13 @@ void setup()
 
   MDNS.begin(hostname);               // Start mDNS 
   server.on("/", HandleRoot);         // Call function if root is called
+  server.on("/logs", HandleLogs);     // Return recent log lines
+  server.on("/logs/clear", HandleLogsClear); // Clear log buffer
   
   httpUpdater.setup(&server);         // Updater
   server.begin();                     // start HTTP server
   WriteLog("HTTP server started");
-   
-  MQTTClient.setServer(MQTT_Broker,MQTT_Broker_Port);
-  MQTTClient.setCallback(MQTTCallback);
-  lastReconnectAttempt = 0;
-  MQTTReconnect;
-  
-  WriteLog("Exiting Setup, starting main loop");
+  WriteLog("Starting HTTP polling loop");
   UpdateDisplay();
 }
 
@@ -581,25 +636,23 @@ void setup()
 // ------------------------------------------------
 void loop() 
 {
-  if (!MQTTClient.connected())      // non blocking MQTT reconnect sequence
-    {
-        long now = millis();
-        if (now - lastReconnectAttempt > 5000) 
-        {
-          lastReconnectAttempt = now;
-          WriteLog("Attempting to reconnect MQTT");
-          if (MQTTReconnect()) 
-          {
-              lastReconnectAttempt = 0;
-          }
-        }
+  if(millis() - lastPollAttempt >= POLL_INTERVAL_MS) {
+    lastPollAttempt = millis();
+    if(!PollAndUpdate()) {
+      consecutiveFailures++;
+      WriteLog("Poll failed (#" + String(consecutiveFailures) + ")");
     }
-    else                            // MQTT is connected, lets send some data
-    { 
-        // do things
-    }
-  if (millis()-lastMQTTDataReceived > MaxDataAge)
+  }
+
+  unsigned long now = millis(); // capture AFTER potential update
+  if (now - lastDataReceived > DATA_STALE_MS)
   {
+    // Extra debug line (only every second to reduce flicker)
+    static unsigned long lastErrLog = 0;
+    if(now - lastErrLog > 1000) {
+      WriteLog(String("Data stale: now=") + now + " lastDataReceived=" + lastDataReceived + " age=" + (now - lastDataReceived));
+      lastErrLog = now;
+    }
     display.clearDisplay();
     display.setTextSize(3);
     display.setCursor(0,0);
@@ -608,7 +661,19 @@ void loop()
     display.display();
   }
 
-  MQTTClient.loop();                    // handle MQTT client & subscription. Display logic is subscription event triggered and can be found in the callback function.
-  server.handleClient();                // handle webserver requests
-  MDNS.update();                        // handle mDNS requests
+  // Handle automatic loadpoint display cycling (only if we have 2 loadpoints and fresh data)
+  if (g_metrics.lpCount > 1 && (now - lastDataReceived) <= DATA_STALE_MS) {
+    if (now - lastLpSwitchMillis >= LP_CYCLE_INTERVAL_MS) {
+      lastLpSwitchMillis = now;
+      currentLpIndex = (currentLpIndex + 1) % g_metrics.lpCount; // wrap
+      // Refresh legacy vars for text layout path and update display
+      LP1_SOC        = g_metrics.lps[currentLpIndex].soc;
+      LP1_IsCharging = g_metrics.lps[currentLpIndex].charging;
+      LP1_PlugStat   = g_metrics.lps[currentLpIndex].plugged;
+      UpdateDisplay();
+    }
+  }
+
+  server.handleClient();
+  MDNS.update();
 }
