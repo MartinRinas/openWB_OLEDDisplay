@@ -61,11 +61,21 @@ Sketch assumes SPI Display, wiring for Wemos D1 & compatible:
 * VCC: 3.3V
 
 # Configuration
-1. Enter your WiFi `ssid` and `pass` in the source file.
-2. Update `HTTP_HOST`, `HTTP_PATH`, and optionally `POLL_INTERVAL_MS`.
-3. Install ArduinoJson if not already available.
-4. Optionally adjust `LP_CYCLE_INTERVAL_MS` (default 7000 ms) to change how fast the screen switches between LP1 and LP2 when two loadpoints are present.
-5. Flash the sketch. First successful poll will update the display.
+
+## WiFi Setup
+1. Copy `wifi_config_template.py` to `wifi_config.py`
+2. Edit `wifi_config.py` and enter your WiFi credentials:
+   - `WIFI_SSID`: Your WiFi network name
+   - `WIFI_PASSWORD`: Your WiFi password
+   - `HOSTNAME`: Device hostname (optional)
+   - `WIFI_TIMEOUT_SECONDS`: Connection timeout (default: 20)
+   - `WIFI_RETRY_DELAY`: Delay between connection attempts (default: 0.5)
+
+## Other Configuration
+1. Update `HTTP_HOST`, `HTTP_PATH`, and optionally `POLL_INTERVAL_MS` in the main file.
+2. Install ArduinoJson if not already available.
+3. Optionally adjust `LP_CYCLE_INTERVAL_MS` (default 7000 ms) to change how fast the screen switches between LP1 and LP2 when two loadpoints are present.
+4. Flash the sketch. First successful poll will update the display.
 
 If you see only LP1, verify a second loadpoint is exposed by the backend and included by the jq filter.
 
